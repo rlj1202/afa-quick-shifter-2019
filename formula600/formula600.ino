@@ -72,6 +72,10 @@ public:
 Button gearUpBtn(PIN_BTN_GEAR_UP);
 Button gearDownBtn(PIN_BTN_GEAR_DOWN);
 
+// 아두이노가 전원이 들어온 직후에 약간의 텀을 두어서 오작동을 줄이고자 함.
+bool startingUp = true;
+const int STARTING_UP_DELAY = 2000;
+
 // taskGear
 bool canGearShift = true;
 unsigned long lastGearShift;
@@ -100,26 +104,53 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 unsigned long lastLCDPrint;
 const unsigned long LCD_PRINT_DELAY = 350;
 
+// taskRPM
+int rpm;
+bool warningMode = false;
+unsigned long lastBlink;
+bool blinkState;
+const unsigned long BLINK_RATE = 200;
+const int WARN_RPM = 13000;
+const unsigned long WARN_DURATION = 1000;
+
+// taskVSS
+int pulses;
+
 /******************************************************************************
  * functions
  ******************************************************************************/
+
+// function declarations
+
+void setup();
+void loop();
+
+void updateRPM();
+void vssInterrupt();
+
+void taskButton();
+void taskGear();
+void taskRPM();
+void taskVSS();
+void taskLCD();
+
+// function definitions
 
 void setup() {
   // setup pin modes
   pinMode(PIN_BTN_GEAR_UP, INPUT_PULLUP);
   pinMode(PIN_BTN_GEAR_DOWN, INPUT_PULLUP);
   
-  pinMode(PIN_VALVE_UP, OUTPUT);
-  pinMode(PIN_VALVE_DOWN, OUTPUT);
-  pinMode(PIN_CUT, OUTPUT);
-
-  pinMode(PIN_VSS, INPUT);
-
-  // init taskGear
+  pinMode(PIN_VALVE_UP, OUTPUT); // relay pin
+  pinMode(PIN_VALVE_DOWN, OUTPUT); // relay pin
+  pinMode(PIN_CUT, OUTPUT); // relay pin
   digitalWrite(PIN_VALVE_UP, HIGH);
   digitalWrite(PIN_VALVE_DOWN, HIGH);
   digitalWrite(PIN_CUT, HIGH);
 
+  pinMode(PIN_VSS, INPUT);
+
+  // init taskGear
   canGearShift = true;
   lastGearShift = millis();
 
@@ -129,9 +160,7 @@ void setup() {
   // init lcd
   lastLCDPrint = millis();
   lcd.begin();
-
   lcd.backlight();
-  lcd.print("Hello, world!");
 }
 
 /*
@@ -148,6 +177,8 @@ void taskButton() {
  */
 
 void taskGear() {
+  if (startingUp) return;
+  
   bool gearUp = gearUpBtn.getState();
   bool gearDown = gearDownBtn.getState();
   
@@ -212,15 +243,39 @@ void taskGear() {
  * taskRPM
  */
 
+void updateRPM() {
+  rpm = analogRead(PIN_RPM);
+  rpm = map(rpm, 0, 1023, 0, 17000);
+}
+
 void taskRPM() {
-  int rpm = analogRead(PIN_RPM);
+  if (!warningMode) {
+    updateRPM();
+    warningMode = rpm >= WARN_RPM;
+  } else {
+    if (millis() - lastBlink > BLINK_RATE) {
+      lastBlink = millis();
+      blinkState = !blinkState;
+    }
+
+    if (blinkState) {
+      pinMode(PIN_RPM, INPUT);
+      updateRPM();
+    } else {
+      pinMode(PIN_RPM, OUTPUT);
+      digitalWrite(PIN_RPM, LOW);
+    }
+
+    if (rpm < WARN_RPM) {
+      warningMode = false;
+      pinMode(PIN_RPM, INPUT);
+    }
+  }
 }
 
 /*
  * taskVSS
  */
-
-int pulses;
 
 void vssInterrupt() {
   pulses++;
@@ -237,18 +292,20 @@ void taskVSS() {
 void taskLCD() {
   if (millis() - lastLCDPrint > LCD_PRINT_DELAY) {
     lastLCDPrint = millis();
-
-    int rpm = analogRead(PIN_RPM);
-    rpm = map(rpm, 0, 1023, 0, 17000);
     
-    lcd.clear();
+    lcd.setCursor(0, 0);
     lcd.print("up ");
     lcd.print(gearUpBtn.getState());
     lcd.print(" down ");
     lcd.print(gearDownBtn.getState());
+    
     lcd.setCursor(0, 1);
     lcd.print("rpm ");
     lcd.print(rpm);
+    lcd.print(" start ");
+    lcd.print(startingUp);
+    
+    lcd.print("               ");
     /*
     lcd.print("pulses : ");
     lcd.print(pulses);
@@ -261,9 +318,11 @@ void taskLCD() {
  ******************************************************************************/
 
 void loop() {
+  if (startingUp && millis() > STARTING_UP_DELAY) startingUp = false;
+  
   taskButton();
   taskGear();
-  // taskRPM();
-  // taskVSS();
+  taskRPM();
+  taskVSS();
   taskLCD();
 }
