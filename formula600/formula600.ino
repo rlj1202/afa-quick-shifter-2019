@@ -99,7 +99,9 @@ const unsigned long GEAR_DOWN_RETURN_DELAY = 300;
 
 bool canCut = false;
 bool canCutReturn = false;
+unsigned long lastCut;
 unsigned long lastCutReturn;
+const unsigned long CUT_DELAY = 0;
 const unsigned long CUT_RETURN_DELAY = 50;
 
 // taskLCD
@@ -232,6 +234,7 @@ void taskGear() {
     canGearShift = false;
 
     canCut = true;
+    lastCut = millis();
 
     if (gearUp == false) {
       canGearUp = true;
@@ -271,7 +274,7 @@ void taskGear() {
   }
 
   // cut and cutReturn
-  if (canCut) {
+  if (canCut && millis() - lastCut > CUT_DELAY) {
     canCut = false;
     canCutReturn = true;
     lastCutReturn = millis();
