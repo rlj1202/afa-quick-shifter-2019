@@ -1,13 +1,15 @@
 /*
  * A-FA 2019 Formula 600cc Arduino Box
  * 
- * By Jisu Sim(rlj1202@gmail.com), Department of Software Engineering, At Ajou Univ.
+ * By Jisu Sim(rlj1202@gmail.com), Department of Software Engineering,
+ *   At Ajou Univ.
  * Copyright 2019. All rights reserved.
  * 
  * Board: Arduino Uno
+ * Engine: CBR600RR Honda 2008
  * Features:
  *   - gear up, down quick shifting using injection cut(or fuel cut)
- *   - rpm check (not implemented)
+ *   - rpm check (calibrating needed)
  *   - speed check (not implemented)
  *   - gear calculation using gear ratio (not implemented)
  */
@@ -15,7 +17,6 @@
 /*
  * TODO List
  *   - gear meter using rpm and vs sensor
- *   - interpolate rpm over time
  */
 
 /*
@@ -25,6 +26,7 @@
  *       So rather control position linearly, divide position into 3. Pushed,
  *       not pushed, half-pushed.
  *   - wing control (due to down-force in corner)
+ *   - neutral gear detection
  */
 
 #include "LiquidCrystal_I2C.h"
@@ -70,16 +72,40 @@ const int PIN_STATUS = 13;
  * global variables
  ******************************************************************************/
 
+// engine specific constants
+const int ENGINE_CYLINDERS = 4;
+const int ENGINE_STROKES = 4;
+
+//   gear ratio = in / out
+const char GEAR_PATTERN[7] = {'1', 'N', '2', '3', '4', '5', '6'};
+const float GEAR_PRIMARY = 2.111; // 76/36
+const float GEAR_FINAL = 2.625; // 42/16
+const float GEAR_RATIO[6] = {
+  2.750, // 33/12
+  2.000, // 32/16
+  1.667, // 30/18
+  1.444, // 26/18
+  1.304, // 30/23
+  1.208  // 29/24
+};
+
 Button gearUpBtn(PIN_BTN_GEAR_UP, HIGH);
 Button gearDownBtn(PIN_BTN_GEAR_DOWN, HIGH);
 
 const unsigned long DEBOUNCE_DELAY = 50; // milli sec
 
 // 아두이노가 전원이 들어온 직후에 약간의 텀을 두어서 오작동을 줄이고자 함.
+// to make arduino waits until system gets stabilized
 bool startingUp = true;
 const int STARTING_UP_DELAY = 800;
 
 // taskGear
+//
+//        0         50        100       150       200       250       300 (ms)
+//        |---------|---------|---------|---------|---------|---------|
+// button *--*
+// gear   *-----------------------------------------------------------*
+// cut              *---------*
 bool canGearShift = true;
 unsigned long lastGearShift;
 const unsigned long GEAR_SHIFT_DELAY = 500;
@@ -92,17 +118,17 @@ unsigned long lastGearUp;
 unsigned long lastGearDown;
 unsigned long lastGearUpReturn;
 unsigned long lastGearDownReturn;
-const unsigned long GEAR_UP_DELAY = 50;
-const unsigned long GEAR_DOWN_DELAY = 50;
-const unsigned long GEAR_UP_RETURN_DELAY = 300;
-const unsigned long GEAR_DOWN_RETURN_DELAY = 300;
+const unsigned long GEAR_UP_DELAY = 0; // IMPORTANT
+const unsigned long GEAR_DOWN_DELAY = 0; // IMPORTANT
+const unsigned long GEAR_UP_RETURN_DELAY = 300; // IMPORTANT
+const unsigned long GEAR_DOWN_RETURN_DELAY = 300; // IMPORTANT
 
 bool canCut = false;
 bool canCutReturn = false;
 unsigned long lastCut;
 unsigned long lastCutReturn;
-const unsigned long CUT_DELAY = 0;
-const unsigned long CUT_RETURN_DELAY = 50;
+const unsigned long CUT_DELAY = 50; // IMPORTANT
+const unsigned long CUT_RETURN_DELAY = 50; // IMPORTANT
 
 // taskLCD
 LiquidCrystal_I2C lcd(0x27, 16, 2);
@@ -117,9 +143,14 @@ const unsigned long SERIAL_DELAY = 100;
 int rpmPulses;
 unsigned long lastRPM;
 const unsigned long MAX_RPM = 17000;
-const unsigned long RPM_CHECK_DURATION = 123;
+const unsigned long RPM_CHECK_DURATION = 100;
 
-int rpm;
+const int MAX_RPM_COUNT = 10; // variables for interpolating rpm over time
+float rpms[MAX_RPM_COUNT];
+int rpm_ptr;
+float rpm_accum;
+float rpm;
+
 bool warningMode = false;
 unsigned long lastBlink;
 bool blinkState;
@@ -128,7 +159,9 @@ const int WARN_RPM = 13000;
 const unsigned long WARN_DURATION = 1000;
 
 // taskVSS
-int pulses;
+int vssPulses;
+unsigned long lastVSS;
+const unsigned long VSS_CHECK_DURATION = 100;
 
 /******************************************************************************
  * class definitions
@@ -266,7 +299,8 @@ void taskGear() {
     lastGearDownReturn = millis();
     digitalWrite(PIN_VALVE_DOWN, LOW);
   }
-  if (canGearDownReturn && millis() - lastGearDownReturn > GEAR_DOWN_RETURN_DELAY) {
+  if (canGearDownReturn
+      && millis() - lastGearDownReturn > GEAR_DOWN_RETURN_DELAY) {
     canGearDownReturn = false;
     canGearShift = true;
     lastGearShift = millis();
@@ -296,36 +330,33 @@ void rpmInterrupt() {
 }
 
 void taskRPM() {
-  if (startingUp) {
-    // analogWrite(PIN_RPM_OUT, millis() / (float) STARTING_UP_DELAY * 255.0);
-    return;
-  }
+  if (startingUp) return;
   
   // read rpm
   
   if (millis() - lastRPM > RPM_CHECK_DURATION) {
     lastRPM = millis();
 
-    rpm = rpmPulses / (float) RPM_CHECK_DURATION * 60000.0; // 1000 * 60
+    // calculate new rpm
+    float new_rpm = rpmPulses / (float) RPM_CHECK_DURATION * 60000.0; // 1000 * 60
     if (rpm > MAX_RPM) rpm = MAX_RPM;
     rpmPulses = 0;
+
+    // accumulate recent rpms
+    rpm_accum -= rpms[rpm_ptr];
+    rpm_accum += new_rpm;
+    rpms[rpm_ptr] = new_rpm;
+    rpm_ptr = (rpm_ptr + 1) % MAX_RPM_COUNT; // move pointer to next
+
+    // update rpm
+    rpm = rpm_accum / (float) MAX_RPM_COUNT; // average rpm
   }
   
-  // write rpm
-  
-  /// TEST
-  /*
-  int wave = (sin(millis() / 100.0) + 1.0) / 2.0 * 160.0 + 256.0 - 160.0;
-  if (wave > 255) {
-    digitalWrite(PIN_RPM_OUT, HIGH);
-  } else {
-    //digitalWrite(PIN_RPM_OUT, LOW);
-    analogWrite(PIN_RPM_OUT, wave);
-  }
-  */
-  /// TEST
+  // write rpm to indicator
 
   analogWrite(PIN_RPM_OUT, map(rpm, 0, MAX_RPM, 0, 255));
+
+  // rpm warning function
   
   if (!warningMode) {
     warningMode = rpm >= WARN_RPM;
@@ -335,11 +366,7 @@ void taskRPM() {
       blinkState = !blinkState;
     }
 
-    if (blinkState) {
-      
-    } else {
-      
-    }
+    if (blinkState) analogWrite(PIN_RPM_OUT, 0);
 
     if (rpm < WARN_RPM) {
       warningMode = false;
@@ -353,11 +380,18 @@ void taskRPM() {
  */
 
 void vssInterrupt() {
-  pulses++;
+  vssPulses++;
 }
 
 void taskVSS() {
-  
+  if (startingUp) return;
+
+  if (millis() - lastVSS > VSS_CHECK_DURATION) {
+    lastVSS = millis();
+
+    // TODO do something with vssPulses
+    vssPulses = 0;
+  }
 }
 
 /*
@@ -386,7 +420,7 @@ void taskLCD() {
     lcd.print("rpm ");
     lcd.print(rpm);
     lcd.print(" vss ");
-    lcd.print(pulses);
+    lcd.print(vssPulses);
     
     lcd.print("               ");
     /*
